@@ -7,6 +7,9 @@ import java.net.Socket;
 import java.util.Random;
 import java.util.Scanner;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /** TCP client representing one campus service counter. */
 public class QueueClient {
@@ -23,6 +26,7 @@ public class QueueClient {
     private final int[] testSequence;
     private volatile boolean running = true;
     private String counterId;
+    private int sequenceIndex = 0;
 
     public QueueClient(Socket socket, int[] testSequence) throws IOException {
         this.socket = socket;
@@ -85,12 +89,16 @@ public class QueueClient {
             return;
         }
 
-        Thread updateThread = new Thread(this::sendAutomaticUpdates, "QueueUpdater");
+        ScheduledExecutorService updater = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "QueueUpdater");
+            thread.setDaemon(true);
+            return thread;
+        });
         Thread menuThread = new Thread(this::handleMenu, "ConsoleMenu");
         // Neither worker should keep the JVM alive after disconnection.
-        updateThread.setDaemon(true);
         menuThread.setDaemon(true);
-        updateThread.start();
+        updater.scheduleAtFixedRate(this::sendAutomaticUpdate,
+                UPDATE_INTERVAL, UPDATE_INTERVAL, TimeUnit.MILLISECONDS);
         menuThread.start();
 
         try {
@@ -115,29 +123,23 @@ public class QueueClient {
             }
         } finally {
             disconnect();
-            updateThread.interrupt();
+            updater.shutdownNow();
             System.out.println("Disconnected. Accepted updates: " + acceptedUpdates.get());
         }
     }
 
-    private void sendAutomaticUpdates() {
-        int index = 0;
+    // Schedule one update at a fixed rate to avoid accumulating execution delays.
+    private void sendAutomaticUpdate() {
+        if (!running) return;
         try {
-            while (running) {
-                // Wait before the first update and between subsequent updates.
-                Thread.sleep(UPDATE_INTERVAL);
-                if (!running) break;
-                int queueLength;
-                if (testSequence == null) {
-                    queueLength = random.nextInt(31);
-                } else {
-                    queueLength = testSequence[index];
-                    index = (index + 1) % testSequence.length;
-                }
-                sendMessage("UPDATE " + queueLength);
+            int queueLength;
+            if (testSequence == null) {
+                queueLength = random.nextInt(31);
+            } else {
+                queueLength = testSequence[sequenceIndex];
+                sequenceIndex = (sequenceIndex + 1) % testSequence.length;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            sendMessage("UPDATE " + queueLength);
         } catch (IOException e) {
             if (running) System.err.println("Update failed: " + e.getMessage());
             disconnect();
